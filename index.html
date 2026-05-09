@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, user-scalable=no"
+    />
+    <title>🌅 Morning Tale — Histoire Interactive 3D</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600&family=DM+Sans:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Loading -->
+    <div id="loading">
+      sf
+      <div class="loading-inner">
+        <div class="ring"></div>
+        <p class="loading-title">Morning Tale</p>
+        <p class="loading-sub">Préparation de la chambre…</p>
+      </div>
+    </div>
+
+    <!-- Blackout overlay -->
+    <div id="blackout"></div>
+
+    <!-- Story UI -->
+    <div id="storyUI">
+      <!-- Progress -->
+      <div id="progressBar"><div id="progressFill"></div></div>
+
+      <!-- Step counter -->
+      <div id="stepCounter">0 / 9</div>
+
+      <!-- Subtitle zone -->
+      <div id="subtitle">
+        <div id="storyEmoji">🌙</div>
+        <div id="storyTitle">Bonne nuit…</div>
+        <div id="storySub">La chambre est calme, la nuit est douce…</div>
+        <div id="interactHint"></div>
+      </div>
+
+      <!-- Next button -->
+      <button id="nextBtn" disabled>Suivant ▶</button>
+    </div>
+
+    <!-- XR Buttons -->
+    <div id="xrBtns">
+      <button class="xr-btn" id="arBtn">📱 AR</button>
+      <button class="xr-btn" id="vrBtn">🥽 VR</button>
+    </div>
+
+    <!-- Free cam -->
+    <button id="freeCamBtn">🎬 Caméra libre</button>
+
+    <!-- Final screen -->
+    <div id="finalScreen">
+      <div id="finalText">
+        ✨ Good Morning!<br /><span>Ready for the day 🌟</span>
+      </div>
+      <button id="restartBtn" onclick="location.reload()">🔄 Rejouer</button>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
