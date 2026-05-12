@@ -61,7 +61,9 @@ export function initAR(renderer, scene) {
   const btn = document.getElementById("arBtn");
   if (!btn) return;
 
-  btn.addEventListener("click", () => _onARButtonClick(renderer, scene));
+  btn.addEventListener("click", () => {
+    window.location.href = "ar-marker.html";
+  });
 }
 
 // ───────────────────────────────────────────────────────────────
