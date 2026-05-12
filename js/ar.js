@@ -15,6 +15,7 @@ let placed = false;
 
 let hitTestSource = null;
 let hitTestRequested = false;
+let hasHitTest = false;
 const reticleWorldPos = new THREE.Vector3();
 
 let reticle = null;
@@ -89,13 +90,35 @@ async function _onARButtonClick(renderer, scene) {
     return;
   }
 
+  // Essai 1 : avec hit-test (placement précis sur le sol)
+  // Essai 2 : sans hit-test (placement manuel à distance fixe)
+  let session = null;
+  hasHitTest = false;
+
   try {
-    const session = await navigator.xr.requestSession("immersive-ar", {
+    session = await navigator.xr.requestSession("immersive-ar", {
       requiredFeatures: ["hit-test"],
       optionalFeatures: ["dom-overlay", "local-floor"],
       domOverlay: { root: document.body },
     });
+    hasHitTest = true;
+  } catch (_) {
+    // hit-test non supporté → on retente sans
+    try {
+      session = await navigator.xr.requestSession("immersive-ar", {
+        requiredFeatures: [],
+        optionalFeatures: ["dom-overlay", "local-floor"],
+        domOverlay: { root: document.body },
+      });
+      hasHitTest = false;
+    } catch (err2) {
+      arActive = false;
+      _arToast("❌ AR non disponible sur cet appareil\n(" + (err2.message?.slice(0, 60) ?? "non supporté") + ")");
+      return;
+    }
+  }
 
+  try {
     // Connecte la session au renderer
     renderer.xr.setReferenceSpaceType("local");
     await renderer.xr.setSession(session);
@@ -122,7 +145,11 @@ async function _onARButtonClick(renderer, scene) {
     document.getElementById("storyUI")?.style.setProperty("opacity", "0.5");
     document.getElementById("storyUI")?.style.setProperty("pointer-events", "none");
 
-    _arToast("📱 Pointez votre caméra vers le sol\npuis appuyez pour placer la chambre");
+    if (hasHitTest) {
+      _arToast("📱 Pointez votre caméra vers le sol\npuis appuyez pour placer la chambre");
+    } else {
+      _arToast("📱 Appuyez n'importe où\npour placer la chambre devant vous");
+    }
 
     // Gestion fin de session
     session.addEventListener("end", () => _onARSessionEnd(renderer, scene));
@@ -166,13 +193,20 @@ function _onARSessionEnd(renderer, scene) {
 //  TAP → PLACER LA CHAMBRE
 // ───────────────────────────────────────────────────────────────
 function _onARSelect() {
-  if (!reticle?.visible || placed || !_scene) return;
+  if (placed || !_scene) return;
 
-  // Positionner le centre de la scène au point détecté sur le sol
-  _scene.position.copy(reticleWorldPos);
+  if (hasHitTest) {
+    // Placement précis : utilise la position détectée sur le sol
+    if (!reticle?.visible) return;
+    _scene.position.copy(reticleWorldPos);
+  } else {
+    // Fallback : place la chambre 1.5 m devant l'utilisateur
+    // La caméra XR démarre à l'origine, donc (0, -0.6, -1.5) = ~1.5 m en face
+    _scene.position.set(0, -0.6, -1.5);
+  }
+
   placed = true;
-  reticle.visible = false;
-
+  if (reticle) reticle.visible = false;
   _arToast("✅ Chambre placée !\nMarchez autour pour explorer 🏠");
 }
 
@@ -185,6 +219,12 @@ export function updateAR(renderer, frame) {
   const session = renderer.xr.getSession();
   const refSpace = renderer.xr.getReferenceSpace();
   if (!session || !refSpace) return;
+
+  // Sans hit-test : le tap seul suffit, rien à calculer par frame
+  if (!hasHitTest) {
+    if (!placed && reticle) reticle.visible = false;
+    return;
+  }
 
   // Initialisation du hit-test (une seule fois)
   if (!hitTestRequested) {
