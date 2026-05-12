@@ -183,7 +183,7 @@ async function init() {
     await Promise.all([loadRoom(scene), loadCharacter(scene)]);
 
     // Initialiser le mode AR (doit être après le chargement de la scène)
-    initAR(renderer, scene);
+    initAR(renderer, scene, controls);
 
     modeManager.register("story",  new StoryMode());
     modeManager.register("design", new DesignMode(scene));

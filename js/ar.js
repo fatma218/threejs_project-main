@@ -1,287 +1,157 @@
 // ═══════════════════════════════════════════════════════════════
-//  ar.js — Mode Réalité Augmentée (WebXR hit-test + placement)
-//  Morning Tale
+//  ar.js — Mode AR Caméra (getUserMedia + Three.js overlay)
+//  La scène réelle s'affiche par-dessus le flux caméra du téléphone
 // ═══════════════════════════════════════════════════════════════
 
 import * as THREE from "three";
 
-// Échelle du monde en AR : 0.3 → chambre 10 unités = 3 m réels
-const AR_SCALE = 0.3;
+let _renderer = null;
+let _scene    = null;
+let _controls = null;
+let arActive  = false;
 
-// État interne
-let _scene = null;
-let arActive = false;
-let placed = false;
-
-let hitTestSource = null;
-let hitTestRequested = false;
-let hasHitTest = false;
-const reticleWorldPos = new THREE.Vector3();
-
-let reticle = null;
-let savedBg = null;
+let _videoEl      = null;
+let _cameraStream = null;
+let _arHintEl     = null;
+let savedBg  = null;
 let savedFog = null;
 
 // ───────────────────────────────────────────────────────────────
-//  INIT — appelez une seule fois au démarrage
+//  INIT — appelé une seule fois depuis app.js
 // ───────────────────────────────────────────────────────────────
-export function initAR(renderer, scene) {
-  _scene = scene;
+export function initAR(renderer, scene, controls) {
+  _renderer = renderer;
+  _scene    = scene;
+  _controls = controls;
 
-  // ── Réticule de placement (anneau doré sur le sol) ──────────
-  const ringGeo = new THREE.RingGeometry(0.05, 0.085, 48).rotateX(-Math.PI / 2);
-  reticle = new THREE.Mesh(
-    ringGeo,
-    new THREE.MeshBasicMaterial({
-      color: 0xffd080,
-      transparent: true,
-      opacity: 0.9,
-      side: THREE.DoubleSide,
-    }),
-  );
-
-  // Point central
-  const dot = new THREE.Mesh(
-    new THREE.CircleGeometry(0.022, 32).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({
-      color: 0xffeebb,
-      transparent: true,
-      opacity: 0.6,
-      side: THREE.DoubleSide,
-    }),
-  );
-  reticle.add(dot);
-
-  // Compensate parent (scene) scale so the ring appears at real-world size
-  reticle.scale.setScalar(1 / AR_SCALE);
-  reticle.visible = false;
-  scene.add(reticle);
-
-  // ── Bouton AR ───────────────────────────────────────────────
   const btn = document.getElementById("arBtn");
   if (!btn) return;
-
-  btn.addEventListener("click", () => {
-    window.location.href = "ar-marker.html";
-  });
+  btn.addEventListener("click", () => arActive ? _stopAR() : _startAR());
 }
 
+// Compatibilité avec l'ancien appel depuis app.js (ne fait plus rien)
+export function updateAR() {}
+export function isARActive() { return arActive; }
+
 // ───────────────────────────────────────────────────────────────
-//  CLIC SUR LE BOUTON AR
+//  DÉMARRAGE AR
 // ───────────────────────────────────────────────────────────────
-async function _onARButtonClick(renderer, scene) {
+async function _startAR() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    _arToast("❌ Caméra non disponible sur cet appareil");
+    return;
+  }
+
   const btn = document.getElementById("arBtn");
-
-  // Arrêter la session si déjà active
-  if (arActive) {
-    renderer.xr.getSession()?.end();
-    return;
-  }
-
-  // Vérifier le support WebXR
-  if (!navigator.xr) {
-    _arToast("❌ WebXR non supporté sur cet appareil");
-    if (btn) { btn.textContent = "❌ Non supporté"; btn.classList.add("dim"); }
-    return;
-  }
-
-  const ok = await navigator.xr.isSessionSupported("immersive-ar").catch(() => false);
-  if (!ok) {
-    _arToast("❌ AR non disponible\n(Android + Chrome requis)");
-    if (btn) { btn.textContent = "❌ AR indispo"; btn.classList.add("dim"); }
-    return;
-  }
-
-  // Essai 1 : avec hit-test (placement précis sur le sol)
-  // Essai 2 : sans hit-test (placement manuel à distance fixe)
-  let session = null;
-  hasHitTest = false;
+  if (btn) btn.textContent = "⏳…";
 
   try {
-    session = await navigator.xr.requestSession("immersive-ar", {
-      requiredFeatures: ["hit-test"],
-      optionalFeatures: ["dom-overlay", "local-floor"],
-      domOverlay: { root: document.body },
+    // ── 1. Ouvrir la caméra arrière ────────────────────────────
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
     });
-    hasHitTest = true;
-  } catch (_) {
-    // hit-test non supporté → on retente sans
-    try {
-      session = await navigator.xr.requestSession("immersive-ar", {
-        requiredFeatures: [],
-        optionalFeatures: ["dom-overlay", "local-floor"],
-        domOverlay: { root: document.body },
-      });
-      hasHitTest = false;
-    } catch (err2) {
-      arActive = false;
-      _arToast("❌ AR non disponible sur cet appareil\n(" + (err2.message?.slice(0, 60) ?? "non supporté") + ")");
-      return;
+    _cameraStream = stream;
+
+    // ── 2. Vidéo en fond (derrière le canvas) ──────────────────
+    _videoEl = document.createElement("video");
+    _videoEl.autoplay    = true;
+    _videoEl.muted       = true;
+    _videoEl.playsInline = true;
+    _videoEl.setAttribute("playsinline", "");
+    _videoEl.srcObject = stream;
+    _videoEl.style.cssText =
+      "position:fixed;top:0;left:0;width:100%;height:100%;" +
+      "object-fit:cover;z-index:0;pointer-events:none;";
+    document.body.appendChild(_videoEl);
+    await _videoEl.play();
+
+    // ── 3. Rendre le canvas Three.js transparent ───────────────
+    _renderer.setClearColor(0x000000, 0);
+    savedBg  = _scene.background;
+    savedFog = _scene.fog;
+    _scene.background = null;
+    _scene.fog        = null;
+
+    // ── 4. Activer OrbitControls (1 doigt = rotation, 2 = zoom) ─
+    if (_controls) {
+      _controls.enabled      = true;
+      _controls.enableZoom   = true;
+      _controls.enablePan    = false;
+      _controls.rotateSpeed  = 0.6;
+      _controls.zoomSpeed    = 0.8;
     }
-  }
 
-  try {
-    // Connecte la session au renderer
-    renderer.xr.setReferenceSpaceType("local");
-    await renderer.xr.setSession(session);
-
-    // ── Mode AR activé ──────────────────────────────────────
     arActive = true;
-    placed = false;
-    hitTestSource = null;
-    hitTestRequested = false;
 
-    renderer.setClearColor(0x000000, 0); // fond transparent → caméra réelle
-    savedBg = scene.background;
-    savedFog = scene.fog;
-    scene.background = null;
-    scene.fog = null;
-
-    // Mise à l'échelle effet "maquette" (dollhouse)
-    scene.scale.setScalar(AR_SCALE);
-    scene.position.set(0, 0, 0);
-
+    // Bouton
     if (btn) { btn.textContent = "⏹ Quitter AR"; btn.classList.add("active"); }
 
-    // Réduire l'opacité de l'UI histoire (toujours lisible via dom-overlay)
-    document.getElementById("storyUI")?.style.setProperty("opacity", "0.5");
+    // Atténuer l'UI histoire
+    document.getElementById("storyUI")?.style.setProperty("opacity", "0.25");
     document.getElementById("storyUI")?.style.setProperty("pointer-events", "none");
 
-    if (hasHitTest) {
-      _arToast("📱 Pointez votre caméra vers le sol\npuis appuyez pour placer la chambre");
-    } else {
-      _arToast("📱 Appuyez n'importe où\npour placer la chambre devant vous");
-    }
-
-    // Gestion fin de session
-    session.addEventListener("end", () => _onARSessionEnd(renderer, scene));
-
-    // Gestion du tap pour placer la scène
-    session.addEventListener("select", _onARSelect);
+    // Hint
+    _showHint("👆 1 doigt → tourner  ·  2 doigts → zoomer");
+    _arToast("📱 La vraie chambre est chargée !\nFais pivoter avec ton doigt 🏠");
 
   } catch (err) {
-    arActive = false;
-    console.warn("AR session error:", err);
-    _arToast("❌ Impossible de démarrer l'AR\n" + (err.message?.slice(0, 50) ?? ""));
+    if (btn) btn.textContent = "📱 AR";
+    const msg = err.name === "NotAllowedError"
+      ? "❌ Permission caméra refusée\nVa dans Paramètres → Chrome → Caméra"
+      : "❌ Caméra non disponible\n" + (err.message?.slice(0, 60) ?? "");
+    _arToast(msg);
   }
 }
 
 // ───────────────────────────────────────────────────────────────
-//  FIN DE SESSION
+//  ARRÊT AR
 // ───────────────────────────────────────────────────────────────
-function _onARSessionEnd(renderer, scene) {
+function _stopAR() {
+  // Arrêter la caméra
+  _cameraStream?.getTracks().forEach(t => t.stop());
+  _videoEl?.remove();
+  _arHintEl?.remove();
+  _cameraStream = null;
+  _videoEl      = null;
+  _arHintEl     = null;
+
+  // Restaurer la scène
+  _renderer.setClearColor(0x0a0818, 1);
+  _scene.background = savedBg;
+  _scene.fog        = savedFog;
+
+  // Désactiver OrbitControls (mode histoire = caméra automatique)
+  if (_controls) _controls.enabled = false;
+
   arActive = false;
-  hitTestSource = null;
-  hitTestRequested = false;
-  placed = false;
-  if (reticle) reticle.visible = false;
 
-  // Restaurer le rendu standard
-  renderer.setClearColor(0x0a0818, 1);
-  scene.background = savedBg;
-  scene.fog = savedFog;
-  scene.scale.setScalar(1);
-  scene.position.set(0, 0, 0);
-  scene.rotation.set(0, 0, 0);
-
-  // Restaurer l'UI
   const btn = document.getElementById("arBtn");
   if (btn) { btn.textContent = "📱 AR"; btn.classList.remove("active"); }
-  const ui = document.getElementById("storyUI");
-  if (ui) { ui.style.removeProperty("opacity"); ui.style.removeProperty("pointer-events"); }
-}
 
-// ───────────────────────────────────────────────────────────────
-//  TAP → PLACER LA CHAMBRE
-// ───────────────────────────────────────────────────────────────
-function _onARSelect() {
-  if (placed || !_scene) return;
-
-  if (hasHitTest) {
-    // Placement précis : utilise la position détectée sur le sol
-    if (!reticle?.visible) return;
-    _scene.position.copy(reticleWorldPos);
-  } else {
-    // Fallback : place la chambre 1.5 m devant l'utilisateur
-    // La caméra XR démarre à l'origine, donc (0, -0.6, -1.5) = ~1.5 m en face
-    _scene.position.set(0, -0.6, -1.5);
-  }
-
-  placed = true;
-  if (reticle) reticle.visible = false;
-  _arToast("✅ Chambre placée !\nMarchez autour pour explorer 🏠");
-}
-
-// ───────────────────────────────────────────────────────────────
-//  UPDATE — appelé chaque frame depuis app.js
-// ───────────────────────────────────────────────────────────────
-export function updateAR(renderer, frame) {
-  if (!arActive || !frame || !_scene) return;
-
-  const session = renderer.xr.getSession();
-  const refSpace = renderer.xr.getReferenceSpace();
-  if (!session || !refSpace) return;
-
-  // Sans hit-test : le tap seul suffit, rien à calculer par frame
-  if (!hasHitTest) {
-    if (!placed && reticle) reticle.visible = false;
-    return;
-  }
-
-  // Initialisation du hit-test (une seule fois)
-  if (!hitTestRequested) {
-    session
-      .requestReferenceSpace("viewer")
-      .then((vs) => session.requestHitTestSource({ space: vs }))
-      .then((src) => {
-        hitTestSource = src;
-      })
-      .catch(() => {});
-    // Nettoyer à la fin de session
-    session.addEventListener("end", () => {
-      hitTestSource = null;
-      hitTestRequested = false;
-    });
-    hitTestRequested = true;
-  }
-
-  // Si déjà placé, rien à faire
-  if (placed || !hitTestSource) return;
-
-  // Récupérer les résultats du hit-test
-  const hits = frame.getHitTestResults(hitTestSource);
-
-  if (hits.length > 0) {
-    const pose = hits[0].getPose(refSpace);
-    if (!pose) return;
-
-    // Position du sol en coordonnées monde réel
-    reticleWorldPos.setFromMatrixPosition(
-      new THREE.Matrix4().fromArray(pose.transform.matrix),
-    );
-
-    // Convertir en coordonnées locales de la scène (compense l'échelle AR)
-    const s = _scene;
-    reticle.position.set(
-      (reticleWorldPos.x - s.position.x) / AR_SCALE,
-      (reticleWorldPos.y - s.position.y) / AR_SCALE,
-      (reticleWorldPos.z - s.position.z) / AR_SCALE,
-    );
-
-    // Animation de pulsation
-    const pulse = 1 + Math.sin(performance.now() * 0.005) * 0.12;
-    reticle.scale.setScalar(pulse / AR_SCALE);
-    reticle.visible = true;
-  } else {
-    reticle.visible = false;
+  const storyUI = document.getElementById("storyUI");
+  if (storyUI) {
+    storyUI.style.removeProperty("opacity");
+    storyUI.style.removeProperty("pointer-events");
   }
 }
 
 // ───────────────────────────────────────────────────────────────
-//  HELPERS
+//  HELPERS UI
 // ───────────────────────────────────────────────────────────────
-export function isARActive() {
-  return arActive;
+function _showHint(text) {
+  _arHintEl?.remove();
+  _arHintEl = document.createElement("div");
+  _arHintEl.style.cssText = `
+    position:fixed;bottom:76px;left:50%;transform:translateX(-50%);
+    background:rgba(10,8,24,0.82);border:1px solid rgba(255,208,128,0.3);
+    border-radius:28px;padding:9px 20px;
+    color:rgba(255,208,128,0.75);font-family:'DM Sans',sans-serif;
+    font-size:12px;pointer-events:none;z-index:50;
+    white-space:nowrap;letter-spacing:0.3px;
+  `;
+  _arHintEl.textContent = text;
+  document.body.appendChild(_arHintEl);
 }
 
 let _toastEl = null;
@@ -303,8 +173,5 @@ function _arToast(text, duration = 4500) {
   _toastEl.textContent = text;
   document.body.appendChild(_toastEl);
   if (duration > 0)
-    setTimeout(() => {
-      _toastEl?.remove();
-      _toastEl = null;
-    }, duration);
+    setTimeout(() => { _toastEl?.remove(); _toastEl = null; }, duration);
 }
