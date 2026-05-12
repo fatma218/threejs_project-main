@@ -8,9 +8,16 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { Reflector } from "three/addons/objects/Reflector.js";
 import { walkTo } from "./models.js";
 import { roomObjects } from "./room.js";
-import { scene as mainScene, renderer, camera as mainCamera } from "./main.js";
+import {
+  scene as mainScene,
+  renderer,
+  camera as mainCamera,
+  setInteractiveObjects,
+} from "./core/SceneGlobals.js";
+import { EventBus } from "./core/EventBus.js";
 
 // ═══════════════════════════════════════════════════════════════
 //  CATALOGUE DE MEUBLES
@@ -27,25 +34,59 @@ const FURNITURE_CATALOG = {
     ],
     colors: ["#ffffff", "#c8a06a", "#4a3020", "#e8d0b0", "#2a3a5a", "#6a4050"],
   },
-  nighttable: {
+  nightstand: {
     label: "Table de Nuit",
     emoji: "🪵",
-    targetSize: 0.7,
+    targetSize: 0.8,
     variants: [
       {
-        id: "table1",
-        label: "Table ronde",
-        path: "models/table1.glb",
+        id: "nightstand",
+        label: "Table de nuit moderne",
+        path: "models/Night Stand.glb",
         emoji: "🪵",
       },
       {
-        id: "table2",
-        label: "Table carrée",
-        path: "models/table2.glb",
+        id: "nightstand2",
+        label: "Table de nuit simple",
+        path: "models/simple_nightstand.glb",
+        emoji: "🪵",
+      },
+      {
+        id: "nightstand3",
+        label: "Table de nuit bois",
+        path: "models/night_stand_table.glb",
         emoji: "🪵",
       },
     ],
     colors: ["#9e7c5a", "#4a3020", "#c8b090", "#606060", "#2a4a3a"],
+  },
+  glass: {
+    label: "Verre",
+    emoji: "🥛",
+    targetSize: 0.4,
+    variants: [
+      {
+        id: "glass",
+        label: "Verre d’eau",
+        path: "models/Glass.glb",
+        emoji: "🥛",
+      },
+    ],
+    colors: ["#ffffff", "#c8e8ff", "#99ccff"],
+  },
+  clock: {
+    label: "Réveil",
+    emoji: "⏰",
+    targetSize: 0.4,
+    variants: [
+      {
+        id: "clock",
+        label: "Réveil",
+        path: "models/clock.glb",
+        emoji: "⏰",
+      },
+    ],
+    colors: ["#c0c0c0", "#3a3a3a", "#e8d0b0"],
   },
   wardrobe: {
     label: "Armoire",
@@ -163,6 +204,88 @@ const FURNITURE_CATALOG = {
     ],
     colors: ["#e0e0e0", "#c0c0c0", "#a0b0c0", "#d0c8b0", "#3a3a3a"],
   },
+  mirror: {
+    label: "Miroir",
+    emoji: "🪞",
+    targetSize: 1.2,
+    variants: [
+      {
+        id: "mirror1",
+        label: "Miroir rond",
+        path: "models/mirror.glb",
+        emoji: "🪞",
+      },
+    ],
+    isWallObject: true,
+    wallConstraint: "height",
+    colors: ["#c0c0c0", "#d4af37", "#3a3a3a"],
+  },
+  door: {
+    label: "Porte",
+    emoji: "🚪",
+    targetSize: 2.1,
+    variants: [
+      {
+        id: "door1",
+        label: "Porte bois",
+        path: "models/door.glb",
+        emoji: "🚪",
+      },
+    ],
+    isWallObject: true,
+    wallConstraint: "height",
+    colors: ["#8b6340", "#5a3a1a", "#d4a574"],
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  DÉFINITION DES MURS (pour miroir, porte, etc.)
+// ═══════════════════════════════════════════════════════════════
+const WALL_DEFINITIONS = {
+  north: {
+    label: "Mur Nord",
+    emoji: "⬇️",
+    axis: "z",
+    position: -5,
+    direction: 1,
+    lengthX: 10,
+    maxHeight: 3.8,
+    normalX: 0,
+    normalZ: -1,
+  },
+  south: {
+    label: "Mur Sud",
+    emoji: "⬆️",
+    axis: "z",
+    position: 5,
+    direction: -1,
+    lengthX: 10,
+    maxHeight: 3.8,
+    normalX: 0,
+    normalZ: 1,
+  },
+  west: {
+    label: "Mur Ouest",
+    emoji: "➡️",
+    axis: "x",
+    position: -5,
+    direction: 1,
+    lengthX: 10,
+    maxHeight: 3.8,
+    normalX: -1,
+    normalZ: 0,
+  },
+  east: {
+    label: "Mur Est",
+    emoji: "⬅️",
+    axis: "x",
+    position: 5,
+    direction: -1,
+    lengthX: 10,
+    maxHeight: 3.8,
+    normalX: 1,
+    normalZ: 0,
+  },
 };
 
 const WALL_PRESETS = [
@@ -206,11 +329,33 @@ let isoLight = null;
 let isoAnimId = null;
 let currentSelectedFurniture = null;
 let pendingFurnitureSelection = null;
+let currentSelectedWall = null;
+let wallModels = new Map();
 let modelCache = {};
 const previewRenderers = new Map();
 
+// Renderer partagé pour toutes les previews — évite la limite de contextes WebGL
+let _sharedPreviewRenderer = null;
+function getSharedPreviewRenderer() {
+  if (!_sharedPreviewRenderer) {
+    _sharedPreviewRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+    });
+    _sharedPreviewRenderer.setPixelRatio(1);
+    _sharedPreviewRenderer.setSize(240, 140);
+    _sharedPreviewRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    _sharedPreviewRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    _sharedPreviewRenderer.toneMappingExposure = 1.2;
+  }
+  return _sharedPreviewRenderer;
+}
+
 // Meubles placés dans la chambre — PERSIST entre ouvertures/fermetures du designer
 let placedFurniture = {};
+
+let _isoKeyDownHandler = null;
 
 // Loaders
 const dracoLoader = new DRACOLoader();
@@ -240,7 +385,37 @@ function saveCurrentModelState() {
     scale: isoModel.scale.clone(),
     rotation: isoModel.rotation.clone(),
     position: isoModel.position.clone(),
+    color: isoModel.userData.color,
+    path: isoModel.userData.sourcePath || null,
   };
+}
+
+function deleteFurniture(key) {
+  const furData = placedFurniture[key];
+  if (furData?.model?.parent === isoScene) {
+    if (isoTransform) isoTransform.detach();
+    isoScene.remove(furData.model);
+  }
+  delete placedFurniture[key];
+
+  if (currentSelectedFurniture === key) {
+    currentSelectedFurniture = null;
+    isoModel = null;
+    const btn = document.getElementById("deleteFurnitureBtn");
+    if (btn) btn.style.display = "none";
+    const emoji = document.getElementById("isoStepEmoji");
+    if (emoji) emoji.textContent = "🗑️";
+    const title = document.getElementById("isoStepTitle");
+    if (title) title.textContent = "Meuble supprimé";
+    const guide = document.getElementById("isoStepGuide");
+    if (guide)
+      guide.textContent = "Choisissez un autre meuble dans le catalogue";
+  }
+
+  document
+    .querySelector(`.cat-quick-btn[data-key="${key}"]`)
+    ?.classList.remove("modified");
+  _updateProgress();
 }
 
 /**
@@ -257,10 +432,29 @@ function isDescendant(parent, child) {
 // ═══════════════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════════════
+function _updateProgress() {
+  const total = Object.keys(FURNITURE_CATALOG).length;
+  const done = Object.keys(placedFurniture).length;
+  const pct = Math.round((done / total) * 100);
+  const fill = document.getElementById("designerProgressFill");
+  if (fill) fill.style.width = pct + "%";
+  const title = document.getElementById("designerTitle");
+  if (title) title.textContent = `🏠 Room Designer (${done}/${total})`;
+}
+
+let _initialized = false;
 export function initDesigner() {
+  if (_initialized) return;
+  _initialized = true;
   injectHTML();
   injectStyles();
   attachListeners();
+}
+
+export { openDesigner, closeDesigner };
+
+export function notifyFurnitureClick(furnitureType) {
+  handleMainSceneFurnitureClick({ detail: furnitureType });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -280,13 +474,26 @@ function attachListeners() {
     .getElementById("designerExpandBtn")
     ?.addEventListener("click", toggleDesignerExpand);
 
-  window.addEventListener("story:interact", handleMainSceneFurnitureClick);
+  // Catalogue rapide — boutons emoji pour chaque catégorie
+  const quickBtns = document.getElementById("catalogQuickBtns");
+  if (quickBtns) {
+    Object.entries(FURNITURE_CATALOG).forEach(([key, cat]) => {
+      const btn = document.createElement("button");
+      btn.className = "cat-quick-btn";
+      btn.dataset.key = key;
+      btn.title = cat.label;
+      btn.innerHTML = `<span class="cqb-emoji">${cat.emoji}</span><span class="cqb-label">${cat.label}</span>`;
+      btn.addEventListener("click", () => selectFurniture(key));
+      quickBtns.appendChild(btn);
+    });
+  }
 
   document.getElementById("isoScaleSlider")?.addEventListener("input", (e) => {
     if (!isoModel) return;
     const s = parseFloat(e.target.value);
     isoModel.scale.set(s, s, s);
     document.getElementById("isoScaleVal").textContent = s.toFixed(2) + "×";
+    saveCurrentModelState();
   });
 
   document.getElementById("isoRotSlider")?.addEventListener("input", (e) => {
@@ -294,6 +501,7 @@ function attachListeners() {
     const deg = parseFloat(e.target.value);
     isoModel.rotation.y = THREE.MathUtils.degToRad(deg);
     document.getElementById("isoRotVal").textContent = deg.toFixed(0) + "°";
+    saveCurrentModelState();
   });
 
   document.querySelectorAll(".gizmo-btn").forEach((btn) => {
@@ -305,6 +513,39 @@ function attachListeners() {
       if (isoTransform) isoTransform.setMode(btn.dataset.mode);
     });
   });
+
+  document
+    .getElementById("deleteFurnitureBtn")
+    ?.addEventListener("click", () => {
+      if (currentSelectedFurniture) deleteFurniture(currentSelectedFurniture);
+    });
+
+  // Sélection de mur
+  document.querySelectorAll(".wall-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const wallName = e.target.closest(".wall-btn").dataset.wall;
+      selectWall(wallName);
+    });
+  });
+
+  document.getElementById("wallPosSlider")?.addEventListener("input", (e) => {
+    if (!isoModel || !currentSelectedWall) return;
+    const pct = parseFloat(e.target.value);
+    document.getElementById("wallPosVal").textContent = pct.toFixed(0) + "%";
+    positionModelOnWall();
+    saveCurrentModelState();
+  });
+
+  document
+    .getElementById("wallHeightSlider")
+    ?.addEventListener("input", (e) => {
+      if (!isoModel || !currentSelectedWall) return;
+      const pct = parseFloat(e.target.value);
+      document.getElementById("wallHeightVal").textContent =
+        pct.toFixed(0) + "%";
+      positionModelOnWall();
+      saveCurrentModelState();
+    });
 }
 
 function handleMainSceneFurnitureClick(event) {
@@ -329,6 +570,7 @@ function openDesigner() {
   document.getElementById("designerOpenBtn").style.display = "none";
 
   adjustMainCanvasForSplit();
+  _showEntryHint();
 
   setTimeout(() => {
     startIsoScene();
@@ -342,8 +584,26 @@ function openDesigner() {
   }, 300);
 }
 
+function _showEntryHint() {
+  document.getElementById("designEntryHint")?.remove();
+  const hint = document.createElement("div");
+  hint.id = "designEntryHint";
+  hint.innerHTML = `
+    <div class="deh-icon">👆</div>
+    <div class="deh-text">Survolez et cliquez un meuble<br>ou choisissez dans le catalogue</div>
+  `;
+  document.body.appendChild(hint);
+  requestAnimationFrame(() => hint.classList.add("show"));
+  const dismiss = () => {
+    hint.classList.remove("show");
+    setTimeout(() => hint.remove(), 400);
+    window.removeEventListener("story:interact", dismiss);
+  };
+  setTimeout(dismiss, 4500);
+  window.addEventListener("story:interact", dismiss, { once: true });
+}
+
 function closeDesigner() {
-  // Sauvegarder le meuble courant avant fermeture
   if (isoModel && currentSelectedFurniture) {
     saveCurrentModelState();
   }
@@ -356,6 +616,9 @@ function closeDesigner() {
   document.getElementById("designerExpandBtn").textContent = "⤢ Agrandir";
   document.getElementById("designerOpenBtn").style.display = "";
   restoreMainCanvasFullWidth();
+
+  // Notifie le ModeManager pour revenir en mode Story
+  EventBus.emit("design:closed");
 }
 
 function toggleDesignerExpand() {
@@ -451,6 +714,16 @@ function startIsoScene() {
     isoOrbit.enabled = !e.value;
   });
   isoTransform.addEventListener("objectChange", syncSlidersFromModel);
+
+  // Delete key — remove selected furniture
+  _isoKeyDownHandler = (e) => {
+    if (!designerActive || !currentSelectedFurniture) return;
+    if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      deleteFurniture(currentSelectedFurniture);
+    }
+  };
+  window.addEventListener("keydown", _isoKeyDownHandler);
 
   // ── RESTAURER les meubles déjà placés lors des réouvertures ──
   // La première fois, placedFurniture est vide → chambre vide (comportement voulu)
@@ -673,6 +946,10 @@ function stopIsoScene() {
     isoModel =
       null;
   window.removeEventListener("resize", resizeIso);
+  if (_isoKeyDownHandler) {
+    window.removeEventListener("keydown", _isoKeyDownHandler);
+    _isoKeyDownHandler = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -684,13 +961,15 @@ function createFurnitureSelectables() {
   // On les garde au cas où la scène est vide (première ouverture).
   const furniturePositions = {
     bed: { pos: [-2.2, 1.0, -1.8] },
-    nighttable: { pos: [-3.7, 0.35, 0.8] },
+    nightstand: { pos: [-3.7, 0.35, 0.8] },
     wardrobe: { pos: [-3.3, 1.1, -3.4] },
     desk: { pos: [2.4, 0.55, 1.6] },
     chair: { pos: [2.2, 0.5, 2.8] },
     lamp: { pos: [-3.6, 0.8, 0.6] },
     plant: { pos: [3.3, 0.65, -3.1] },
     sink: { pos: [3.5, 0.5, -1.0] },
+    glass: { pos: [-2.8, 0.35, -1.0] },
+    clock: { pos: [-2.5, 0.35, -1.2] },
   };
 
   for (const [key, data] of Object.entries(furniturePositions)) {
@@ -734,6 +1013,22 @@ function selectFurniture(furnitureType) {
   document.getElementById("isoStepGuide").textContent =
     `Personnalisez votre ${catalog.label.toLowerCase()}`;
 
+  // Afficher le bouton supprimer uniquement si le meuble est déjà placé
+  const delBtn = document.getElementById("deleteFurnitureBtn");
+  if (delBtn)
+    delBtn.style.display = placedFurniture[furnitureType] ? "" : "none";
+
+  // Afficher/masquer les contrôles de mur selon le type de meuble
+  updateWallControlsVisibility(furnitureType);
+
+  // Activer le bouton catalogue correspondant
+  document
+    .querySelectorAll(".cat-quick-btn")
+    .forEach((b) => b.classList.remove("active"));
+  document
+    .querySelector(`.cat-quick-btn[data-key="${furnitureType}"]`)
+    ?.classList.add("active");
+
   buildInventoryGrid(furnitureType);
 
   // Si ce meuble est déjà placé, ré-attacher le gizmo directement
@@ -751,12 +1046,7 @@ function selectFurniture(furnitureType) {
 }
 
 function disposePreviewRenderers() {
-  previewRenderers.forEach((renderer, canvas) => {
-    if (renderer) {
-      renderer.forceContextLoss();
-      renderer.dispose();
-    }
-  });
+  // Le renderer partagé est réutilisé — on vide seulement la map
   previewRenderers.clear();
 }
 
@@ -799,6 +1089,78 @@ function buildInventoryGrid(furnitureType) {
 // ═══════════════════════════════════════════════════════════════
 //  CHARGEMENT MEUBLE — logique principale corrigée
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+//  GÉNÉRATION PROCÉDURALE DES OBJETS MURAUX
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Crée un miroir procéduralement
+ */
+function createMirrorGeometry() {
+  const group = new THREE.Group();
+
+  const woodMat = new THREE.MeshStandardMaterial({
+    color: 0x9e7c5a,
+    roughness: 0.35,
+    metalness: 0.3,
+  });
+  const mirrorMat = new THREE.MeshStandardMaterial({
+    color: 0xddeeff,
+    roughness: 0.01,
+    metalness: 0.98,
+  });
+
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.5, 0.08), woodMat);
+  frame.castShadow = true;
+  frame.receiveShadow = true;
+  group.add(frame);
+
+  const mirrorPlane = new Reflector(new THREE.PlaneGeometry(0.98, 1.36), {
+    clipBias: 0.003,
+    textureWidth: 512,
+    textureHeight: 512,
+    color: 0xddeeff,
+  });
+  mirrorPlane.position.z = 0.045;
+  mirrorPlane.receiveShadow = true;
+  group.add(mirrorPlane);
+
+  return group;
+}
+
+/**
+ * Crée une porte procéduralement
+ */
+function createDoorGeometry() {
+  const group = new THREE.Group();
+
+  const woodMat = new THREE.MeshStandardMaterial({
+    color: 0x8b6340,
+    roughness: 0.6,
+  });
+  const handleMat = new THREE.MeshStandardMaterial({
+    color: 0xc0c0c0,
+    roughness: 0.3,
+    metalness: 0.8,
+  });
+
+  const door = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.1, 0.08), woodMat);
+  door.castShadow = true;
+  door.receiveShadow = true;
+  group.add(door);
+
+  const handle = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04, 0.04, 0.06, 8),
+    handleMat,
+  );
+  handle.rotation.z = Math.PI / 2;
+  handle.position.set(0.35, 0, 0.08);
+  handle.castShadow = true;
+  group.add(handle);
+
+  return group;
+}
+
 async function loadFurnitureIntoIso(furnitureType, path) {
   if (!isoScene || !isoTransform) return;
   const catalog = FURNITURE_CATALOG[furnitureType];
@@ -811,20 +1173,32 @@ async function loadFurnitureIntoIso(furnitureType, path) {
     isoModel = null;
   }
 
-  // 2. Si ce type de meuble est déjà dans la scène ISO, ré-attacher le gizmo
+  // 2. Si ce type de meuble est déjà dans la scène ISO, vérifier le chemin
   const existing = placedFurniture[furnitureType];
   if (existing?.model?.parent === isoScene) {
-    isoModel = existing.model;
-    isoTransform.attach(isoModel);
-    syncSlidersFromModel();
-    return;
+    if (existing.data?.path === path) {
+      isoModel = existing.model;
+      isoTransform.attach(isoModel);
+      syncSlidersFromModel();
+      return;
+    }
+
+    isoTransform.detach();
+    isoScene.remove(existing.model);
+    existing.model = null;
   }
 
   // 3. Charger un nouveau modèle et l'ajouter à la scène (il y reste)
   showIsoLoading(true);
   try {
     let model;
-    if (modelCache[path]) {
+
+    // Cas spéciaux : objets muraux générés proceduralement
+    if (furnitureType === "mirror") {
+      model = createMirrorGeometry();
+    } else if (furnitureType === "door") {
+      model = createDoorGeometry();
+    } else if (modelCache[path]) {
       model = modelCache[path].clone();
     } else {
       const gltf = await new Promise((res, rej) =>
@@ -840,9 +1214,27 @@ async function loadFurnitureIntoIso(furnitureType, path) {
     const maxDim = Math.max(size.x, size.y, size.z);
     if (maxDim > 0) model.scale.setScalar(catalog.targetSize / maxDim);
 
-    // Poser sur le sol
+    // Poser sur le sol ou restaurer la position/rotation existante
     const box2 = new THREE.Box3().setFromObject(model);
-    model.position.y = -box2.min.y;
+    const previousData = existing?.data;
+    if (previousData && previousData.path !== path) {
+      model.position.copy(previousData.position);
+      model.rotation.copy(previousData.rotation);
+      model.scale.copy(previousData.scale);
+      if (previousData.color) {
+        const color = new THREE.Color(previousData.color);
+        model.traverse((c) => {
+          if (c.isMesh && c.material) {
+            const mats = Array.isArray(c.material) ? c.material : [c.material];
+            mats.forEach((m) => {
+              m.color = color.clone();
+            });
+          }
+        });
+      }
+    } else {
+      model.position.y = -box2.min.y;
+    }
 
     model.traverse((c) => {
       if (c.isMesh) {
@@ -851,9 +1243,21 @@ async function loadFurnitureIntoIso(furnitureType, path) {
       }
     });
 
+    model.userData.sourcePath = path;
     isoScene.add(model);
     isoModel = model;
-    isoTransform.attach(model);
+
+    // Pour les objets muraux, attacher et positionner immédiatement
+    if (FURNITURE_CATALOG[furnitureType]?.isWallObject) {
+      // Positionner sur le mur si un mur n'est pas encore sélectionné
+      if (!currentSelectedWall) {
+        selectWall("north"); // Par défaut, mur nord
+      } else {
+        positionModelOnWall();
+      }
+    } else {
+      isoTransform.attach(model);
+    }
 
     // Enregistrer immédiatement dans placedFurniture
     placedFurniture[furnitureType] = {
@@ -863,8 +1267,19 @@ async function loadFurnitureIntoIso(furnitureType, path) {
         scale: model.scale.clone(),
         rotation: model.rotation.clone(),
         position: model.position.clone(),
+        path,
       },
     };
+
+    // Badge ✓ sur le bouton catalogue + mise à jour progress
+    document
+      .querySelector(`.cat-quick-btn[data-key="${furnitureType}"]`)
+      ?.classList.add("modified");
+    _updateProgress();
+
+    // Montrer le bouton supprimer maintenant que le meuble est chargé
+    const delBtn = document.getElementById("deleteFurnitureBtn");
+    if (delBtn) delBtn.style.display = "";
 
     // Ajuster caméra sur le meuble
     const box3 = new THREE.Box3().setFromObject(model);
@@ -895,22 +1310,11 @@ async function createVariantPreview(variant, canvas) {
 
   const hemi = new THREE.HemisphereLight(0xf8f4d9, 0x444766, 0.8);
   previewScene.add(hemi);
-  const key = new THREE.DirectionalLight(0xffffff, 1.2);
-  key.position.set(2, 4, 2);
-  previewScene.add(key);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  keyLight.position.set(2, 4, 2);
+  previewScene.add(keyLight);
 
   const previewCamera = new THREE.PerspectiveCamera(40, 240 / 140, 0.1, 50);
-  previewCamera.position.set(0, 1.2, 2.2);
-  previewCamera.lookAt(0, 0.7, 0);
-
-  const previewRenderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    alpha: true,
-  });
-  previewRenderer.setPixelRatio(1);
-  previewRenderer.setSize(240, 140);
-  previewRenderers.set(canvas, previewRenderer);
 
   try {
     const model = await loadPreviewModel(variant.path);
@@ -928,7 +1332,14 @@ async function createVariantPreview(variant, canvas) {
     previewCamera.updateProjectionMatrix();
 
     previewScene.add(model);
-    previewRenderer.render(previewScene, previewCamera);
+
+    // Rendre dans le renderer partagé puis copier sur le canvas cible
+    const shared = getSharedPreviewRenderer();
+    shared.render(previewScene, previewCamera);
+
+    canvas.width = 240;
+    canvas.height = 140;
+    canvas.getContext("2d")?.drawImage(shared.domElement, 0, 0);
   } catch (err) {
     console.warn("⚠️ Préview échouée:", err);
   }
@@ -985,6 +1396,7 @@ function buildColorPalette(furnitureType) {
 function applyColorToModel(hex) {
   if (!isoModel) return;
   const color = new THREE.Color(hex);
+  isoModel.userData.color = hex;
   isoModel.traverse((c) => {
     if (c.isMesh && c.material) {
       const mats = Array.isArray(c.material) ? c.material : [c.material];
@@ -1007,6 +1419,8 @@ function applyColorToModel(hex) {
 function resetSliders() {
   document.getElementById("isoScaleSlider").value = 1;
   document.getElementById("isoRotSlider").value = 0;
+  document.getElementById("wallPosSlider").value = 50;
+  document.getElementById("wallHeightSlider").value = 50;
   syncSlidersUI();
 }
 
@@ -1017,6 +1431,118 @@ function syncSlidersUI() {
     parseFloat(s).toFixed(2) + "×";
   document.getElementById("isoRotVal").textContent =
     parseFloat(r).toFixed(0) + "°";
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SYSTÈME DE MUR (pour miroir, porte, etc.)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Affiche/masque les contrôles de mur selon le type de meuble
+ */
+function updateWallControlsVisibility(furnitureType) {
+  const catalog = FURNITURE_CATALOG[furnitureType];
+  const isWallObject = catalog?.isWallObject === true;
+
+  const wallSelectionSection = document.getElementById("wallSelectionSection");
+  const wallPositionSection = document.getElementById("wallPositionSection");
+  const wallHeightSection = document.getElementById("wallHeightSection");
+
+  if (wallSelectionSection)
+    wallSelectionSection.style.display = isWallObject ? "block" : "none";
+  if (wallPositionSection)
+    wallPositionSection.style.display = isWallObject ? "block" : "none";
+  if (wallHeightSection)
+    wallHeightSection.style.display = isWallObject ? "block" : "none";
+
+  // Désactiver les contrôles normaux (scale, rotation) pour les objets muraux
+  document.querySelectorAll(".gizmo-btn").forEach((btn) => {
+    btn.style.opacity = isWallObject ? "0.4" : "1";
+    btn.style.pointerEvents = isWallObject ? "none" : "all";
+  });
+
+  if (isWallObject) {
+    currentSelectedWall = null;
+    document
+      .querySelectorAll(".wall-btn")
+      .forEach((btn) => btn.classList.remove("active"));
+  }
+}
+
+/**
+ * Sélectionne un mur et positionne le modèle dessus
+ */
+function selectWall(wallName) {
+  if (!WALL_DEFINITIONS[wallName] || !currentSelectedFurniture || !isoModel)
+    return;
+
+  currentSelectedWall = wallName;
+
+  // Mettre à jour l'UI des boutons
+  document
+    .querySelectorAll(".wall-btn")
+    .forEach((btn) => btn.classList.remove("active"));
+  document
+    .querySelector(`.wall-btn[data-wall="${wallName}"]`)
+    ?.classList.add("active");
+
+  // Détacher avant repositionnement
+  isoTransform.detach();
+
+  // Positionner le modèle sur le mur
+  positionModelOnWall();
+
+  // Ré-attacher pour les contrôles
+  isoTransform.attach(isoModel);
+}
+
+/**
+ * Positionne le modèle sur le mur sélectionné selon les sliders
+ */
+function positionModelOnWall() {
+  if (
+    !isoModel ||
+    !currentSelectedWall ||
+    !WALL_DEFINITIONS[currentSelectedWall]
+  )
+    return;
+
+  const wall = WALL_DEFINITIONS[currentSelectedWall];
+  const posPct =
+    parseFloat(document.getElementById("wallPosSlider")?.value || 50) / 100;
+  const heightPct =
+    parseFloat(document.getElementById("wallHeightSlider")?.value || 50) / 100;
+
+  // Calculer la position sur le mur
+  const wallLength = wall.lengthX || 10;
+  let posX, posZ;
+
+  if (wall.axis === "z") {
+    // Murs nord/sud
+    posX = -wallLength / 2 + posPct * wallLength;
+    posZ = wall.position;
+  } else {
+    // Murs est/ouest
+    posX = wall.position;
+    posZ = -wallLength / 2 + posPct * wallLength;
+  }
+
+  // Hauteur : 0 = bas, 1 = haut
+  const posY = heightPct * wall.maxHeight;
+
+  isoModel.position.set(posX, posY, posZ);
+
+  // Orienter le modèle vers la scène
+  isoModel.rotation.y = Math.atan2(-wall.normalZ, -wall.normalX);
+
+  // Mettre à jour les sliders d'orientation
+  document.getElementById("isoRotSlider").value = THREE.MathUtils.radToDeg(
+    isoModel.rotation.y,
+  );
+  document.getElementById("isoRotVal").textContent =
+    THREE.MathUtils.radToDeg(isoModel.rotation.y).toFixed(0) + "°";
+
+  saveCurrentModelState();
 }
 
 function syncSlidersFromModel() {
@@ -1069,6 +1595,13 @@ async function finishDesigner() {
         }
       });
 
+      model.userData.interactable = true;
+      model.userData.name = furnitureType;
+      model.userData.onInteract = () =>
+        window.dispatchEvent(
+          new CustomEvent("story:interact", { detail: furnitureType }),
+        );
+
       // Remplacer dans la scène principale
       const existing = roomObjects[furnitureType];
       if (existing) mainScene.remove(existing);
@@ -1079,7 +1612,12 @@ async function finishDesigner() {
     }
   }
 
+  // ✅ Mettre à jour la liste des objets interactables pour le raycaster
+  const interactives = Object.values(roomObjects).filter(Boolean);
+  setInteractiveObjects(interactives);
+
   showIsoLoading(false);
+  EventBus.emit("design:applied");
   closeDesigner();
   showFinalMessage();
 }
@@ -1133,10 +1671,16 @@ function injectHTML() {
 
     <div id="designerBody">
       <div id="designerLeft">
+        <div id="furnitureCatalogBar">
+          <div class="ctrl-label">📋 Catalogue rapide</div>
+          <div id="catalogQuickBtns"></div>
+        </div>
+
         <div id="stepInfoCard">
           <div id="isoStepEmoji">🛏️</div>
           <div id="isoStepTitle">Sélectionnez un meuble</div>
           <div id="isoStepGuide">Cliquez sur un meuble dans la scène pour le personnaliser</div>
+          <button id="deleteFurnitureBtn" class="delete-furniture-btn" style="display:none">🗑️ Supprimer</button>
         </div>
 
         <div class="ctrl-section">
@@ -1147,6 +1691,26 @@ function injectHTML() {
         <div class="ctrl-section">
           <div class="ctrl-label">🎨 Couleur</div>
           <div id="colorPalette"></div>
+        </div>
+
+        <div id="wallSelectionSection" class="ctrl-section" style="display: none;">
+          <div class="ctrl-label">🧱 Sélectionner un mur</div>
+          <div id="wallButtonsContainer" class="wall-buttons">
+            <button class="wall-btn" data-wall="north">⬇️ Nord</button>
+            <button class="wall-btn" data-wall="south">⬆️ Sud</button>
+            <button class="wall-btn" data-wall="west">➡️ Ouest</button>
+            <button class="wall-btn" data-wall="east">⬅️ Est</button>
+          </div>
+        </div>
+
+        <div id="wallPositionSection" class="ctrl-section" style="display: none;">
+          <div class="ctrl-label">↔ Position sur mur &nbsp;<span id="wallPosVal">0%</span></div>
+          <input type="range" id="wallPosSlider" min="0" max="100" step="1" value="50">
+        </div>
+
+        <div id="wallHeightSection" class="ctrl-section" style="display: none;">
+          <div class="ctrl-label">↕ Hauteur sur mur &nbsp;<span id="wallHeightVal">50%</span></div>
+          <input type="range" id="wallHeightSlider" min="0" max="100" step="1" value="50">
         </div>
 
         <div class="ctrl-section">
@@ -1176,7 +1740,7 @@ function injectHTML() {
             <div class="iso-ring"></div>
             <span>Chargement…</span>
           </div>
-          <div id="isoCamHint">🖱️ Glisser pour tourner · Scroll pour zoomer · Cliquez sur un meuble</div>
+          <div id="isoCamHint">🖱️ Glisser pour tourner · Scroll pour zoomer · Cliquez un meuble · Suppr: supprimer</div>
         </div>
       </div>
     </div>
@@ -1241,7 +1805,6 @@ function injectStyles() {
 #designerBody { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
 #designerOverlay.designer-expanded { left: 0; right: auto; width: 100%; }
-#designerOverlay.designer-expanded #designerLeft { display: none; }
 #designerOverlay.designer-expanded #designerRight { flex: 1; }
 
 #designerLeft {
@@ -1320,6 +1883,13 @@ input[type=range]::-webkit-slider-thumb {
 }
 .gizmo-btn:hover { background: rgba(240,168,80,0.1); }
 .gizmo-btn.active { background: rgba(240,168,80,0.2); border-color: rgba(240,168,80,0.5); color: #f0d080; }
+.delete-furniture-btn {
+  display: block; width: 100%; margin-top: 10px; padding: 7px 14px; border-radius: 14px;
+  border: 1px solid rgba(255,100,100,0.4); background: rgba(255,60,60,0.08);
+  color: rgba(255,140,140,0.9); cursor: pointer; font-size: 12px; font-weight: 500;
+  font-family: var(--font-body,sans-serif); transition: all 0.2s;
+}
+.delete-furniture-btn:hover { background: rgba(255,60,60,0.2); border-color: rgba(255,100,100,0.7); }
 
 #designerFooter {
   display: flex; align-items: center; justify-content: space-between;
@@ -1360,6 +1930,54 @@ input[type=range]::-webkit-slider-thumb {
   transition: all 0.3s;
 }
 #designerFinalMsg.show { opacity: 1; transform: translateY(0); }
+
+/* ── Catalogue rapide ─────────────────────────────────────── */
+#furnitureCatalogBar { display: flex; flex-direction: column; gap: 8px; }
+#catalogQuickBtns { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat-quick-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 8px 6px; border-radius: 12px; min-width: 58px;
+  border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.65); cursor: pointer; font-family: var(--font-body,sans-serif);
+  transition: all 0.18s; position: relative;
+}
+.cat-quick-btn:hover { background: rgba(240,168,80,0.12); border-color: rgba(240,168,80,0.35); color: #f0d080; transform: translateY(-1px); }
+.cat-quick-btn.active { background: rgba(240,168,80,0.2); border-color: rgba(240,168,80,0.6); color: #f0d080; }
+.cqb-emoji { font-size: 20px; line-height: 1; }
+.cqb-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.7; }
+.cat-quick-btn.modified::after {
+  content: "✓"; position: absolute; top: -4px; right: -4px;
+  width: 14px; height: 14px; border-radius: 50%; font-size: 9px;
+  background: #4caf50; color: #fff; display: flex; align-items: center; justify-content: center;
+  line-height: 14px; text-align: center;
+}
+
+/* ── Sélection de mur ──────────────────────────────────────── */
+.wall-buttons {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.wall-btn {
+  padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.65);
+  cursor: pointer; font-size: 12px; font-family: var(--font-body,sans-serif);
+  transition: all 0.18s; display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.wall-btn:hover { background: rgba(100,200,255,0.12); border-color: rgba(100,200,255,0.35); color: #7dd3fc; }
+.wall-btn.active { background: rgba(100,200,255,0.25); border-color: rgba(100,200,255,0.6); color: #38bdf8; box-shadow: 0 0 12px rgba(100,200,255,0.2); }
+
+/* ── Overlay d'entrée ─────────────────────────────────────── */
+#designEntryHint {
+  position: fixed; left: 25%; top: 50%; transform: translate(-50%, -50%) scale(0.9);
+  background: rgba(8,6,20,0.92); border: 1px solid rgba(240,168,80,0.4);
+  border-radius: 20px; padding: 20px 28px; text-align: center;
+  z-index: 200; backdrop-filter: blur(16px);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.4s, transform 0.4s;
+}
+#designEntryHint.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.deh-icon { font-size: 32px; margin-bottom: 10px; animation: pulse 1.5s infinite; }
+.deh-text { color: rgba(255,220,160,0.9); font-size: 13px; line-height: 1.6; }
+@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 `;
   document.head.appendChild(s);
 }

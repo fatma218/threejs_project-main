@@ -6,7 +6,8 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
-import { setInteractiveObjects } from "./main.js";
+import { Reflector } from "three/addons/objects/Reflector.js";
+import { setInteractiveObjects } from "./core/SceneGlobals.js";
 
 // ── Loader ────────────────────────────────────────────────────
 const dracoLoader = new DRACOLoader();
@@ -29,6 +30,7 @@ export const roomObjects = {
   door: null,
   mirror: null,
   glass: null,
+  clock: null,
 };
 
 export const roomConfig = {
@@ -63,7 +65,7 @@ export async function loadRoom(scene) {
     // Lit — contre le mur nord-ouest
     ["models/bed2.glb", -2.8, -3.5, 0, 2.0, "bed"],
     // Table de nuit — à droite du lit
-
+    ["models/Night Stand.glb", -1.4, -3.2, 0, 0.8, "nightstand"],
     // Armoire — mur ouest
     ["models/wardrobe1.glb", -4.2, -1.0, Math.PI / 2, 2.2, "wardrobe"],
     // Bureau — coin est
@@ -76,6 +78,9 @@ export async function loadRoom(scene) {
     ["models/lamp1.glb", -3.8, 2.8, 0, 1.6, "lamp"],
     // Chaise bureau
     ["models/chair4.glb", 2.8, 2.8, Math.PI, 0.95, "chair"],
+    // Verre et réveil sur la table de nuit
+    ["models/Glass.glb", -1.4, -3.2, 0, 0.5, "glass"],
+    ["models/clock.glb", -1.1, -3.1, 0, 0.5, "clock"],
   ];
 
   await Promise.all(
@@ -85,8 +90,6 @@ export async function loadRoom(scene) {
   );
 
   buildMirror(scene);
-  buildGlass(scene);
-  buildNightstandDecor(scene);
 
   const interactives = Object.values(roomObjects).filter(Boolean);
   setInteractiveObjects(interactives);
@@ -246,6 +249,11 @@ function buildDoor(scene, D, W) {
   knob.position.set(0.88, 1.05, -0.07);
   pivot.add(knob);
 
+  pivot.userData.interactable = true;
+  pivot.userData.name = "door";
+  pivot.userData.onInteract = () =>
+    window.dispatchEvent(new CustomEvent("story:interact", { detail: "door" }));
+
   roomObjects.door = pivot;
 }
 
@@ -270,13 +278,20 @@ function buildMirror(scene) {
   frame.castShadow = true;
   g.add(frame);
 
-  const glass = new THREE.Mesh(new THREE.BoxGeometry(0.98, 1.36, 0.02), mirror);
-  glass.position.z = 0.045;
-  g.add(glass);
+  const mirrorPlane = new Reflector(new THREE.PlaneGeometry(0.98, 1.36), {
+    clipBias: 0.003,
+    textureWidth: 512,
+    textureHeight: 512,
+    color: 0xddeeff,
+  });
+  mirrorPlane.position.z = 0.045;
+  mirrorPlane.receiveShadow = true;
+  g.add(mirrorPlane);
 
   scene.add(g);
   roomObjects.mirror = g;
   g.userData.interactable = true;
+  g.userData.name = "mirror";
   g.userData.onInteract = () =>
     window.dispatchEvent(
       new CustomEvent("story:interact", { detail: "mirror" }),
@@ -284,92 +299,6 @@ function buildMirror(scene) {
 }
 
 // ── Verre d'eau (sur table de nuit) ──────────────────────────
-function buildGlass(scene) {
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0x99ccff,
-    roughness: 0.04,
-    metalness: 0.1,
-    transparent: true,
-    opacity: 0.55,
-  });
-  const waterMat = new THREE.MeshStandardMaterial({
-    color: 0x66aaff,
-    transparent: true,
-    opacity: 0.7,
-  });
-
-  const g = new THREE.Group();
-  g.position.set(-0.8, 0.72, -3.2);
-  scene.add(g);
-
-  const cup = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.065, 0.052, 0.18, 14),
-    glassMat,
-  );
-  cup.position.y = 0.09;
-  g.add(cup);
-
-  const water = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.057, 0.048, 0.12, 14),
-    waterMat,
-  );
-  water.position.y = 0.06;
-  g.add(water);
-
-  roomObjects.glass = g;
-  g.userData.interactable = true;
-  g.userData.onInteract = () =>
-    window.dispatchEvent(
-      new CustomEvent("story:interact", { detail: "glass" }),
-    );
-}
-
-// ── Décor table de nuit : lampe de chevet + réveil ───────────
-function buildNightstandDecor(scene) {
-  const woodMat = new THREE.MeshStandardMaterial({
-    color: 0x9e7c5a,
-    roughness: 0.6,
-  });
-  const shadeMat = new THREE.MeshStandardMaterial({
-    color: 0xffe0a0,
-    roughness: 0.8,
-    transparent: true,
-    opacity: 0.85,
-  });
-  const metalMat = new THREE.MeshStandardMaterial({
-    color: 0xb0a090,
-    roughness: 0.3,
-    metalness: 0.7,
-  });
-  const screenM = new THREE.MeshStandardMaterial({
-    color: 0x66ff99,
-    emissive: new THREE.Color(0x004422),
-    roughness: 0.5,
-  });
-
-  const base = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.055, 0.07, 0.12, 12),
-    woodMat,
-  );
-  const stem = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.012, 0.012, 0.28, 8),
-    woodMat,
-  );
-  const shade = new THREE.Mesh(
-    new THREE.ConeGeometry(0.12, 0.18, 12, 1, true),
-    shadeMat,
-  );
-  base.position.set(-0.8, 0.72, -3.45);
-  stem.position.set(-0.8, 0.9, -3.45);
-  shade.position.set(-0.8, 1.08, -3.45);
-  scene.add(base, stem, shade);
-
-  const clk = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.09, 0.07), metalMat);
-  const scr = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.055, 0.01), screenM);
-  clk.position.set(-1.05, 0.755, -3.22);
-  scr.position.set(-1.05, 0.755, -3.198);
-  scene.add(clk, scr);
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  HELPER — Charger un GLB avec autoScale
@@ -398,6 +327,8 @@ function loadModel(scene, path, x, z, rotY, targetSize, key) {
         });
 
         model.userData.interactable = true;
+        model.name = key;
+        model.userData.name = key;
         model.userData.onInteract = () =>
           window.dispatchEvent(
             new CustomEvent("story:interact", { detail: key }),
@@ -439,6 +370,7 @@ function buildFallbackBox(scene, x, z, size, key) {
   mesh.position.set(x, size / 2, z);
   mesh.castShadow = true;
   mesh.userData.interactable = true;
+  mesh.userData.name = key;
   mesh.userData.onInteract = () =>
     window.dispatchEvent(new CustomEvent("story:interact", { detail: key }));
   scene.add(mesh);

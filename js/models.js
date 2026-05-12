@@ -65,9 +65,8 @@ export async function loadCharacter(scene) {
   // Animer les clips inclus dans le fichier principal
   if (character.animations?.length) {
     const base = mixer.clipAction(character.animations[0]);
-    base.play();
     actions["idle"] = base;
-    currentAction = base;
+    currentAction = null;
   }
 
   scene.add(character);
@@ -79,13 +78,15 @@ export async function loadCharacter(scene) {
     loadAnimation("models/caracter3D/Sitting Idle.fbx", "sit"),
     loadAnimation("models/caracter3D/Picking Up Object.fbx", "pickup"),
     loadAnimation("models/caracter3D/Standing Torch Light Torch.fbx", "hold"),
+    loadAnimation("models/caracter3D/Stroke Shaking Head.fbx", "sleep"),
+    loadAnimation("models/caracter3D/Situps.fbx", "situp"),
   ]);
 
   // Mesure le rayon de collision du personnage
   updateCharacterCollisionRadius();
 
-  // Initialiser le contrôle clavier dès que le personnage est prêt
-  initCharacterKeyboardControl();
+  // Poser le personnage sur le lit en pose couchée pour le début de l'histoire
+  initSleepingPose();
 
   console.log(
     "✅ models.js — Personnage + animations chargés",
@@ -104,10 +105,13 @@ function loadFBX(path) {
 }
 
 // ── Charger une animation séparée ────────────────────────────
+
 async function loadAnimation(path, key) {
   const anim = await loadFBX(path);
   if (!anim || !anim.animations?.length) return;
+  console.log(`Animation ${key} tracks:`, anim.animations[0].tracks[0].name); // Vérifie le préfixe
   const clip = anim.animations[0];
+
   const action = mixer.clipAction(clip);
   action.clampWhenFinished = true;
   actions[key] = action;
@@ -118,13 +122,18 @@ async function loadAnimation(path, key) {
 // ═══════════════════════════════════════════════════════════════
 export function playAnimation(key, loop = true, fadeTime = 0.4) {
   const next = actions[key];
-  if (!next || next === currentAction) return;
+  if (!next) return;
+
+  // On force la sortie de pause au cas où
+  next.paused = false;
+
+  if (next === currentAction && next.isRunning()) return;
 
   next.reset();
-  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
   next.fadeIn(fadeTime);
 
-  if (currentAction) currentAction.fadeOut(fadeTime);
+  if (currentAction && currentAction !== next) currentAction.fadeOut(fadeTime);
   next.play();
   currentAction = next;
 }
@@ -141,7 +150,7 @@ export function walkTo(pos, duration = 2.0, onDone = null) {
   walkState.active = true;
   walkState.onDone = onDone;
 
-  playAnimation("walk", true, 0.3);
+  playAnimation("walk", true, 0.3, 0.5);
 
   // Orienter vers la destination
   const dir = new THREE.Vector3(...pos).sub(character.position);
@@ -160,33 +169,48 @@ function easeInOut(t) {
 export function updateCharacter(dt) {
   if (!character) return;
 
-  // Mixer animations
+  // 1. Toujours mettre à jour le mixer (indispensable pour voir le mouvement)
   mixer?.update(dt);
 
-  // Contrôle clavier manuel si activé et aucune marche automatique en cours
-  const moving = updateCharacterManualMovement(dt);
-  if (moving) return;
-
-  // Walk tween
+  // 2. PRIORITÉ 1 : Si une marche automatique (walkTo) est en cours
   if (walkState.active) {
-    walkState.t += dt / walkState.duration;
-    const e = easeInOut(Math.min(walkState.t, 1));
+    updateWalkTween(dt);
+    return; // On s'arrête ici, on ne laisse pas le clavier interférer
+  }
 
-    character.position.lerpVectors(walkState.from, walkState.to, e);
-    // Bob vertical (effet de marche)
-    character.position.y =
-      THREE.MathUtils.lerp(walkState.from.y, walkState.to.y, e) +
-      Math.sin(walkState.t * walkState.duration * 5) *
-        0.04 *
-        Math.sin(Math.PI * Math.min(walkState.t, 1));
+  // 3. PRIORITÉ 2 : Si une animation "OneTime" est en cours (ex: réveil, ramasser)
+  // On vérifie si l'animation actuelle n'est pas en boucle (LoopRepeat)
+  // et si elle est toujours en train de jouer.
+  const isPlayingSpecial =
+    currentAction &&
+    currentAction.loop === THREE.LoopOnce &&
+    currentAction.isRunning();
 
-    if (walkState.t >= 1) {
-      walkState.active = false;
-      character.position.y = walkState.to.y;
-      // Revenir à idle une fois arrivé
-      playAnimation("idle", true, 0.4);
-      walkState.onDone?.();
-    }
+  if (isPlayingSpecial) {
+    return; // On laisse l'animation spéciale finir sans forcer le "Idle"
+  }
+
+  // 4. PRIORITÉ 3 : Si rien d'autre ne se passe, on active le contrôle manuel
+  updateCharacterManualMovement(dt);
+}
+
+// Petit helper pour garder le code propre (logique que tu avais déjà)
+function updateWalkTween(dt) {
+  walkState.t += dt / walkState.duration;
+  const e = easeInOut(Math.min(walkState.t, 1));
+
+  character.position.lerpVectors(walkState.from, walkState.to, e);
+  character.position.y =
+    THREE.MathUtils.lerp(walkState.from.y, walkState.to.y, e) +
+    Math.sin(walkState.t * walkState.duration * 5) *
+      0.04 *
+      Math.sin(Math.PI * Math.min(walkState.t, 1));
+
+  if (walkState.t >= 1) {
+    walkState.active = false;
+    character.position.y = walkState.to.y;
+    playAnimation("idle", true, 0.4);
+    walkState.onDone?.();
   }
 }
 
@@ -194,9 +218,151 @@ export function updateCharacter(dt) {
 //  ACTIONS SPÉCIALES (déclenchées par story.js)
 // ═══════════════════════════════════════════════════════════════
 
+function computeBedSleepingTransform(character) {
+  const bed = roomObjects.bed;
+  if (!bed || !character) return null;
+
+  const bedBox = new THREE.Box3().setFromObject(bed);
+  if (bedBox.isEmpty()) return null;
+
+  const charBox = new THREE.Box3().setFromObject(character);
+  if (charBox.isEmpty()) return null;
+
+  const bedSize = bedBox.getSize(new THREE.Vector3());
+  const mattressTopY = bedBox.min.y + bedSize.y * 0.22;
+
+  const bedQuat = new THREE.Quaternion();
+  bed.getWorldQuaternion(bedQuat);
+  const bedRight = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(bedQuat)
+    .normalize();
+  const bedForward = new THREE.Vector3(0, 0, 1)
+    .applyQuaternion(bedQuat)
+    .normalize();
+
+  const position = new THREE.Vector3(
+    (bedBox.min.x + bedBox.max.x) * 0.5,
+    mattressTopY,
+    (bedBox.min.z + bedBox.max.z) * 0.5,
+  )
+    .addScaledVector(bedRight, bedSize.x * 0.08)
+    .addScaledVector(bedForward, bedSize.z * 0.05);
+
+  const charBottomOffset = character.position.y - charBox.min.y;
+  position.y += charBottomOffset - Math.max(0.02, bedSize.y * 0.03);
+
+  const lyingAlongX = bedSize.x > bedSize.z;
+  const rotationY = bed.rotation.y + (lyingAlongX ? Math.PI / 2 : 0);
+
+  return { position, rotationY };
+}
+
+function computeBedExitTransform(character) {
+  const bed = roomObjects.bed;
+  if (!bed || !character) return null;
+
+  const bedBox = new THREE.Box3().setFromObject(bed);
+  if (bedBox.isEmpty()) return null;
+
+  const charBox = new THREE.Box3().setFromObject(character);
+  if (charBox.isEmpty()) return null;
+
+  const bedSize = bedBox.getSize(new THREE.Vector3());
+  const bedCenter = new THREE.Vector3(
+    (bedBox.min.x + bedBox.max.x) * 0.5,
+    bedBox.min.y,
+    (bedBox.min.z + bedBox.max.z) * 0.5,
+  );
+
+  const bedQuat = new THREE.Quaternion();
+  bed.getWorldQuaternion(bedQuat);
+  const bedForward = new THREE.Vector3(0, 0, 1)
+    .applyQuaternion(bedQuat)
+    .normalize();
+
+  const exitDirection = new THREE.Vector3();
+  const roomCenter = new THREE.Vector3(0, 0, 0);
+  const towardCenter = roomCenter.sub(bedCenter);
+  const forwardSign = towardCenter.dot(bedForward) >= 0 ? 1 : -1;
+  exitDirection.copy(bedForward).multiplyScalar(forwardSign);
+
+  const margin = Math.max(manualControl.radius, 0.2);
+  const offsetDistance = bedSize.z * 0.75 + margin;
+
+  const position = new THREE.Vector3(
+    (bedBox.min.x + bedBox.max.x) * 0.5,
+    bedBox.max.y + (charBox.max.y - charBox.min.y) * 0.02,
+    (bedBox.min.z + bedBox.max.z) * 0.5,
+  ).addScaledVector(exitDirection, offsetDistance);
+
+  position.y =
+    bedBox.min.y +
+    bedSize.y * 0.2 +
+    Math.max(0.02, charBox.max.y - charBox.min.y) * 0.02;
+
+  return { position, rotationY: character.rotation.y };
+}
+
+// ── Pose initiale — couché sur le lit ────────────────────────
+export function initSleepingPose() {
+  if (!character) return;
+
+  const transform = computeBedSleepingTransform(character);
+  if (transform) {
+    character.position.copy(transform.position);
+    character.rotation.y = transform.rotationY;
+  } else {
+    const bedPos = roomObjects.bed?.position;
+    character.position.set(
+      bedPos ? bedPos.x + 0.2 : -2.6,
+      bedPos ? bedPos.y + 0.5 : 0.5,
+      bedPos ? bedPos.z + 0.1 : -3.3,
+    );
+    character.rotation.y = Math.PI * 0.15;
+  }
+
+  const sleepAction = actions["sleep"];
+  if (sleepAction) {
+    sleepAction.reset();
+    sleepAction.setLoop(THREE.LoopRepeat, Infinity);
+    sleepAction.clampWhenFinished = false;
+    if (currentAction && currentAction !== sleepAction)
+      currentAction.fadeOut(0.05);
+    sleepAction.fadeIn(0.3);
+    sleepAction.play();
+    currentAction = sleepAction;
+  }
+}
+
+// Réveille le personnage depuis la pose couchée
+export function doWakeUp(onDone) {
+  if (!character) return;
+
+  // 1. On monte le mesh au niveau du matelas pour le début du réveil
+  character.position.y = 0.6;
+
+  playAnimation("situp", false, 0.3);
+  const duration = actions["situp"]
+    ? actions["situp"].getClip().duration * 1000
+    : 2500;
+
+  setTimeout(() => {
+    // 2. On téléporte le mesh là où l'animation visuelle s'est terminée
+    // Cela évite le "glissement" vers l'arrière
+    const forwardOffset = new THREE.Vector3(0, 0, 0.8); // Ajuste la valeur 0.8 selon l'anim
+    forwardOffset.applyQuaternion(character.quaternion);
+    character.position.add(forwardOffset);
+
+    // 3. On pose le personnage au sol
+    character.position.y = 0;
+
+    playAnimation("idle", true, 0.5);
+    onDone?.();
+  }, duration);
+}
+
 export function doStandUp(onDone) {
   playAnimation("standup", false, 0.3);
-  // Après ~2s, revenir idle
   setTimeout(() => {
     playAnimation("idle", true, 0.4);
     onDone?.();
@@ -278,7 +444,10 @@ function updateCharacterManualMovement(dt) {
   if (manualControl.keys.right) dir.x += 1;
 
   if (dir.lengthSq() === 0) {
-    playAnimation("idle", true, 0.2);
+    // Ne pas forcer idle si le personnage est encore en animation de sommeil ou en animation spéciale
+    if (currentAction === actions["idle"] || currentAction === null) {
+      playAnimation("idle", true, 0.2);
+    }
     return false;
   }
 

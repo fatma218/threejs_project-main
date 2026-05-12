@@ -1,20 +1,26 @@
 // ═══════════════════════════════════════════════════════════════
 //  main.js — Scene · Renderer · Camera · Lights · Loop
-//  Morning Tale — Interactive 3D Story
+//  Morning Tale — Version Animations Avancées
 // ═══════════════════════════════════════════════════════════════
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { loadRoom, roomObjects } from "./room.js";
 import { loadCharacter, updateCharacter } from "./models.js";
-
 import { initDesigner } from "./designer.js";
-
 import { initStory, updateStory } from "./story.js";
 import { initAR } from "./ar.js";
 import { initVR } from "./vr.js";
+import { initInteraction } from "./interaction.js";
+import {
+  initCamera,
+  updateCamera,
+  initCinematicOverlays,
+  setVignette,
+} from "./camera.js";
+import { initEffects } from "./effects.js";
 
-// ── Exports (utilisés par les autres modules) ──────────────────
+// ── Exports ───────────────────────────────────────────────────
 export let scene, camera, renderer, controls, clock;
 export let ambientLight, sunLight, winGlow, lampLight;
 
@@ -45,24 +51,20 @@ scene.background = new THREE.Color(0x0a0818);
 // ═══════════════════════════════════════════════════════════════
 camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 60);
 camera.position.set(0, 5, 9);
-
 clock = new THREE.Clock();
 
-// ── Resize ──
 window.addEventListener("resize", () => {
   const designerOverlay = document.getElementById("designerOverlay");
   const isDesignerOpen = designerOverlay?.classList.contains("show");
-
   const w = isDesignerOpen ? window.innerWidth / 2 : window.innerWidth;
   const h = window.innerHeight;
-
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
 });
 
 // ═══════════════════════════════════════════════════════════════
-//  4. ORBIT CONTROLS (libre ou story)
+//  4. ORBIT CONTROLS
 // ═══════════════════════════════════════════════════════════════
 controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 1.2, 0);
@@ -71,17 +73,14 @@ controls.dampingFactor = 0.06;
 controls.minDistance = 1;
 controls.maxDistance = 18;
 controls.maxPolarAngle = Math.PI * 0.82;
-controls.enabled = false; // désactivé pendant la story
+controls.enabled = false;
 
 // ═══════════════════════════════════════════════════════════════
 //  5. LUMIÈRES
 // ═══════════════════════════════════════════════════════════════
-
-// Ambiance nuit (bleue-violette froide)
 ambientLight = new THREE.AmbientLight(0x1a1035, 2.2);
 scene.add(ambientLight);
 
-// Lumière lune (fenêtre)
 const moonLight = new THREE.DirectionalLight(0x4466dd, 0.9);
 moonLight.position.set(-4, 9, 5);
 moonLight.castShadow = true;
@@ -95,51 +94,36 @@ moonLight.shadow.normalBias = 0.02;
 scene.add(moonLight);
 export { moonLight };
 
-// Soleil levant (commence à 0 — s'allume à l'étape 2)
 sunLight = new THREE.DirectionalLight(0xffcc66, 0);
 sunLight.position.set(0, 7, -6);
 sunLight.castShadow = false;
 scene.add(sunLight);
 
-// Halo fenêtre (point derrière la vitre)
 winGlow = new THREE.PointLight(0xffaa44, 0, 9);
 winGlow.position.set(0, 2.4, -4.8);
 scene.add(winGlow);
 
-// Lampe de chevet (chaude, toujours présente la nuit)
 lampLight = new THREE.PointLight(0xff9944, 1.6, 5);
 lampLight.position.set(-3.6, 1.5, 1.4);
 lampLight.castShadow = false;
 scene.add(lampLight);
 
-// Lumière écran bureau (bleue, s'allume à l'étape 7)
 export const screenLight = new THREE.PointLight(0x4488ff, 0, 3);
 screenLight.position.set(2.4, 1.6, 2.2);
 scene.add(screenLight);
 
-// Lumière miroir (shimmer)
 export const mirrorLight = new THREE.PointLight(0xeeeeff, 0, 2.5);
 mirrorLight.position.set(3.4, 1.8, -2.2);
 scene.add(mirrorLight);
 
-// Lumière sol (ambiance violet doux)
 const floorGlow = new THREE.PointLight(0x6633aa, 0.5, 4);
 floorGlow.position.set(1.5, 0.08, 1.5);
 scene.add(floorGlow);
 
-// ═══════════════════════════════════════════════════════════════
-//  6. CAMERA TWEEN SYSTEM
-// ═══════════════════════════════════════════════════════════════
-const camState = {
-  fromPos: new THREE.Vector3(),
-  fromLook: new THREE.Vector3(),
-  toPos: new THREE.Vector3(),
-  toLook: new THREE.Vector3(),
-  t: 1,
-  duration: 2.2,
-  active: false,
-  onDone: null,
-};
+// Lumière de remplissage douce
+const fillLight = new THREE.DirectionalLight(0x334466, 0.4);
+fillLight.position.set(5, 3, 5);
+scene.add(fillLight);
 
 export function tweenCamera(pos, look, duration = 2.2, onDone = null) {
   if (controls.enabled) return;
@@ -162,33 +146,35 @@ function easeInOut(t) {
 // ═══════════════════════════════════════════════════════════════
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-let interactiveObjects = []; // rempli après chargement
+let interactiveObjects = [];
 
 export function setInteractiveObjects(objs) {
   interactiveObjects = objs;
 }
 
 window.addEventListener("pointerdown", (e) => {
-  // Ignore si c'est un bouton UI
   if (e.target !== renderer.domElement) return;
-
-  // Calculer les coordonnées du pointer relatives au canvas
   const rect = renderer.domElement.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-
-  pointer.x = (x / rect.width) * 2 - 1;
-  pointer.y = -(y / rect.height) * 2 + 1;
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-
   const hits = raycaster.intersectObjects(interactiveObjects, true);
   if (hits.length > 0) {
-    const obj = hits[0].object;
-    // Remonte jusqu'à l'objet interactif tagué
-    let cur = obj;
+    let cur = hits[0].object;
     while (cur && !cur.userData.interactable) cur = cur.parent;
     if (cur?.userData?.onInteract) cur.userData.onInteract();
   }
+});
+
+// ── Curseur interactif ────────────────────────────────────────
+renderer.domElement.style.cursor = "default";
+window.addEventListener("mousemove", (e) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(interactiveObjects, true);
+  renderer.domElement.style.cursor = hits.length > 0 ? "pointer" : "default";
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -206,7 +192,7 @@ document.getElementById("freeCamBtn")?.addEventListener("click", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-//  9. PARTICULES FLOTTANTES (poussière / lumière)
+//  9. PARTICULES FLOTTANTES
 // ═══════════════════════════════════════════════════════════════
 const PART_COUNT = 160;
 const pPositions = new Float32Array(PART_COUNT * 3);
@@ -231,27 +217,32 @@ const particles = new THREE.Points(
     transparent: true,
     opacity: 0.25,
     sizeAttenuation: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
   }),
 );
 scene.add(particles);
 
 // ═══════════════════════════════════════════════════════════════
-//  10. INIT — Chargement des assets puis démarrage
+//  10. INIT
 // ═══════════════════════════════════════════════════════════════
 async function init() {
   try {
-    // Chargement parallèle de la chambre et du personnage
-    await Promise.all([loadRoom(scene), loadCharacter(scene)]);
+    // Système caméra cinématique
+    initCamera(camera, controls, renderer);
+    initCinematicOverlays();
 
-    // Init AR / VR
+    // Effets visuels
+    initEffects(scene);
+
+    // Chargement parallèle
+    await Promise.all([loadRoom(scene), loadCharacter(scene)]);
 
     initAR(renderer);
     initVR(renderer);
-
-    // Init story (Phase 2)
     initStory();
     initDesigner();
-    // Cacher le loading
+
     const loading = document.getElementById("loading");
     if (loading) {
       loading.style.opacity = "0";
@@ -271,10 +262,9 @@ renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
 
-  // Controls
   controls.update();
 
-  // Camera tween
+  // Camera tween principal
   if (camState.active && !controls.enabled) {
     camState.t += dt / camState.duration;
     const e = easeInOut(Math.min(camState.t, 1));
@@ -287,13 +277,16 @@ renderer.setAnimationLoop(() => {
     }
   }
 
-  // Update personnage + animations
+  // Système caméra avancé (shake, FOV, etc.)
+  updateCamera(dt);
+
+  // Personnage
   updateCharacter(dt);
 
-  // Update story logic
+  // Story + effets
   updateStory(dt, t);
 
-  // Particules flottantes
+  // Particules ambiantes
   const pa = pGeo.attributes.position.array;
   for (let i = 0; i < PART_COUNT; i++) {
     pa[i * 3 + 1] += pSpeeds[i];
@@ -303,11 +296,10 @@ renderer.setAnimationLoop(() => {
   }
   pGeo.attributes.position.needsUpdate = true;
 
-  // Lampe de chevet — légère pulsation
+  // Lampe de chevet pulsation
   lampLight.intensity = 1.6 + Math.sin(t * 1.1) * 0.08;
 
   renderer.render(scene, camera);
 });
 
-// ── Démarrage ──
 init();
